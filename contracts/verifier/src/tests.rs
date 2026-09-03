@@ -1,7 +1,6 @@
 extern crate std;
 
 use super::*;
-use soroban_sdk::testutils::storage::Instance as _;
 use soroban_sdk::testutils::storage::Temporary as _;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::{vec, Address, Bytes, BytesN, Env, Event as _, IntoVal, String, Vec};
@@ -628,7 +627,7 @@ fn admin_can_update_limits() {
 
 #[test]
 fn get_config_returns_initialized_values() {
-    let (env, admin, client) = setup(7, 42);
+    let (_env, admin, client) = setup(7, 42);
 
     let config = client.get_config();
 
