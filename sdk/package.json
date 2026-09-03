@@ -1,0 +1,48 @@
+{
+  "name": "@zksoroban/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for Soroban zero-knowledge proof formatting and verification",
+  "main": "dist/index.cjs",
+  "module": "dist/index.mjs",
+  "types": "dist/types/index.d.ts",
+  "type": "commonjs",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./browser": {
+      "types": "./dist/types/browser.d.ts",
+      "import": "./dist/browser/index.mjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "npm run build:cjs && npm run build:esm && npm run build:types && npm run build:browser && node scripts/postbuild.cjs",
+    "build:cjs": "tsc -p tsconfig.cjs.json",
+    "build:esm": "tsc -p tsconfig.esm.json",
+    "build:types": "tsc -p tsconfig.types.json",
+    "build:browser": "vite build",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && tsx --test --test-force-exit test/**/*.ts",
+    "test:golden": "tsx scripts/golden.ts"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^16.2.0",
+    "circomlibjs": "^0.1.7",
+    "ffjavascript": "^0.3.1"
+  },
+  "peerDependencies": {
+    "snarkjs": "^0.7.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "fast-check": "^4.9.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2"
+  }
+}
