@@ -106,7 +106,7 @@ Known gaps, tracked as open issues rather than left implicit:
 
 - The setup artifacts in `circuits/poseidon_preimage/setup/` are testnet-only and non-production.
 - `contracts/verifier` still hardcodes one circuit's verifying key; `contracts/registry` supports multiple, and is deployed, but only `poseidon_preimage` is registered under it so far.
-- This contract provides no replay protection — see [docs/security.md](docs/security.md) for what it does and does not guarantee.
+- `contracts/registry` enforces replay protection via per-proof nullifiers. `contracts/verifier` (the original single-circuit contract) does not — see [docs/security.md](docs/security.md) for the full guarantees.
 
 Building an application on top of `zkstellar`? Read
 [docs/security-model.md](docs/security-model.md) first — it covers the
