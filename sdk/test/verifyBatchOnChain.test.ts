@@ -33,34 +33,39 @@ function withStubbedServer(
   });
 }
 
-function buildFnReturnDiagnosticEvent(values: boolean[]): string {
+function buildFnReturnDiagnosticEvent(values: boolean[]): xdr.DiagnosticEvent {
   const v0 = new xdr.ContractEventV0({
     topics: [xdr.ScVal.scvSymbol("fn_return"), xdr.ScVal.scvSymbol("verify_batch")],
     data: xdr.ScVal.scvVec(values.map((v) => xdr.ScVal.scvBool(v)))
   });
-  const body = new xdr.ContractEventBody(0, v0);
   const event = new xdr.ContractEvent({
-    ext: new xdr.ExtensionPoint(0),
+    ext: xdr.ExtensionPoint.v0(),
     contractId: null,
-    type: xdr.ContractEventType.contract(),
-    body
+    type: xdr.ContractEventType.contract,
+    body: xdr.ContractEventBody.v0(v0)
   });
-  const diagnostic = new xdr.DiagnosticEvent({
+  return new xdr.DiagnosticEvent({
     inSuccessfulContractCall: true,
     event
   });
-  return diagnostic.toXDR("base64");
 }
 
-function buildTransactionResultXdr(feeCharged = "100"): string {
-  const result = xdr.TransactionResultResult.txSuccess([]);
-  const ext = new xdr.TransactionResultExt(0);
-  const tr = new xdr.TransactionResult({
-    feeCharged: xdr.Int64.fromString(feeCharged),
-    result,
-    ext
+function buildTransactionResult(feeCharged = "100"): xdr.TransactionResult {
+  return new xdr.TransactionResult({
+    feeCharged: BigInt(feeCharged),
+    result: xdr.TransactionResultResult.txSuccess([]),
+    ext: xdr.TransactionResultExt.v0()
   });
-  return tr.toXDR("base64");
+}
+
+// Matches rpc.Api.GetSuccessfulTransactionResponse: resultXdr is already a
+// parsed object, diagnosticEventsXdr is an array of parsed DiagnosticEvent.
+interface StubSuccessTx {
+  status: typeof rpc.Api.GetTransactionStatus.SUCCESS;
+  txHash: string;
+  ledger: number;
+  resultXdr: xdr.TransactionResult;
+  diagnosticEventsXdr?: xdr.DiagnosticEvent[];
 }
 
 const DEFAULT_OPTS: VerifyBatchOptions = {
@@ -79,14 +84,15 @@ function buildSuccessStub(returnValues: boolean[], capturedArgs: { args?: xdr.Sc
     getAccount: async (id: string) => new stellarSdk.Account(id, "0"),
     prepareTransaction: async (tx: any) => {
       const op = tx.operations[0];
-      capturedArgs.args = op.func.invokeContract().args();
+      capturedArgs.args = op.func.invokeContract.args;
       return tx;
     },
     sendTransaction: async () => ({ status: "PENDING", hash: "a".repeat(64) }),
-    _getTransaction: async () => ({
+    getTransaction: async (): Promise<StubSuccessTx> => ({
       status: rpc.Api.GetTransactionStatus.SUCCESS,
+      txHash: "b".repeat(64),
       ledger: 12345,
-      resultXdr: buildTransactionResultXdr(),
+      resultXdr: buildTransactionResult(),
       diagnosticEventsXdr: [buildFnReturnDiagnosticEvent(returnValues)]
     })
   };
@@ -127,8 +133,13 @@ test("verifyBatchOnChain passes caller and one vec argument to verify_batch", as
       const callerAddress = stellarSdk.Address.fromScVal(captured.args![0]);
       assert.equal(callerAddress.toString(), STUB_KEYPAIR.publicKey());
 
-      assert.equal(captured.args![1].switch().name, "scvVec");
-      assert.equal(captured.args![1].vec()!.length, DEFAULT_OPTS.items.length);
+      // In v17, ScVal union arms are properties (not methods) and .type is a
+      // string literal instead of a switch-returned enum value.
+      assert.equal(captured.args![1].type, "scvVec");
+      assert.equal(
+        (captured.args![1] as xdr.ScValVec).value.length,
+        DEFAULT_OPTS.items.length
+      );
     }
   );
 });

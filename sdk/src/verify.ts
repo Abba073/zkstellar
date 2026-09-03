@@ -33,11 +33,11 @@ import { validateCalldata } from "./validate.js";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 1_000;
 
-function makeBytesScVal(bytes: Buffer): xdr.ScVal {
+function makeBytesScVal(bytes: Uint8Array): xdr.ScVal {
   return xdr.ScVal.scvBytes(bytes);
 }
 
-function makePublicInputsScVal(publicInputs: Buffer[]): xdr.ScVal {
+function makePublicInputsScVal(publicInputs: Uint8Array[]): xdr.ScVal {
   return xdr.ScVal.scvVec(publicInputs.map((item) => xdr.ScVal.scvBytes(item)));
 }
 
@@ -87,7 +87,7 @@ function makeRegistryBatchItemScVal(circuitId: number, calldata: SorobanProofCal
 }
 
 function feeFromResult(result: xdr.TransactionResult): string {
-  return result.feeCharged().toString();
+  return result.feeCharged.toString();
 }
 
 // Maps contracts/verifier's `Error` enum (#[contracterror], repr(u32)) to a
@@ -140,14 +140,14 @@ function decodeReturnValueFromDiagnostics(
 
   for (const event of diagnosticEventsXdr) {
     const contractEvent = event.event();
-    const topics = contractEvent.body().v0().topics();
+    const topics = contractEvent.body.v0.topics;
     if (topics.length < 2) {
       continue;
     }
 
     const marker = scValToNative(topics[0]);
     if (marker === "fn_return") {
-      return Boolean(scValToNative(contractEvent.body().v0().data()));
+      return Boolean(scValToNative(contractEvent.body.v0.data));
     }
   }
 
@@ -176,23 +176,22 @@ function decodeVerifyReturnValue(result: {
 }
 
 function decodeBoolArrayFromDiagnostics(
-  diagnosticEventsXdr: string[] | undefined
+  diagnosticEventsXdr: xdr.DiagnosticEvent[] | undefined
 ): boolean[] | undefined {
   if (!diagnosticEventsXdr) {
     return undefined;
   }
 
-  for (const encoded of diagnosticEventsXdr) {
-    const event = xdr.DiagnosticEvent.fromXDR(encoded, "base64");
+  for (const event of diagnosticEventsXdr) {
     const contractEvent = event.event();
-    const topics = contractEvent.body().v0().topics();
+    const topics = contractEvent.body.v0.topics;
     if (topics.length < 2) {
       continue;
     }
 
     const marker = scValToNative(topics[0]);
     if (marker === "fn_return") {
-      const native = scValToNative(contractEvent.body().v0().data());
+      const native = scValToNative(contractEvent.body.v0.data);
       return Array.isArray(native) ? native.map(Boolean) : undefined;
     }
   }
@@ -397,7 +396,7 @@ export async function verifyBatchOnChain(opts: VerifyBatchOptions): Promise<Veri
 
     const started = Date.now();
     while (Date.now() - started < DEFAULT_TIMEOUT_MS) {
-      const result = await server._getTransaction(sendResult.hash);
+      const result = await server.getTransaction(sendResult.hash);
 
       if (result.status === rpc.Api.GetTransactionStatus.NOT_FOUND) {
         await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
@@ -426,7 +425,7 @@ export async function verifyBatchOnChain(opts: VerifyBatchOptions): Promise<Veri
         verified: returnValue ?? [],
         txHash: result.txHash,
         ledger: result.ledger,
-        fee: feeFromResult(xdr.TransactionResult.fromXDR(result.resultXdr, "base64"))
+        fee: feeFromResult(result.resultXdr)
       };
     }
 
