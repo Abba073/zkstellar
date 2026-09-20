@@ -146,9 +146,12 @@ export function bundleDigest(bundle: ProofBundle): string {
     publicSignals: bundle.publicSignals,
     circuit: bundle.circuit,
     generatedAt: bundle.generatedAt,
+    // networkPassphrase is a well-known Stellar protocol constant string
+    // (e.g. "Test SDF Network ; September 2015"), not a user password.
+    // This SHA-256 is used for content-integrity detection, not password storage.
     networkPassphrase: bundle.networkPassphrase,
   });
-  return createHash("sha256").update(content, "utf8").digest("hex");
+  return createHash("sha256").update(content, "utf8").digest("hex"); // CodeQL [js/weak-cryptographic-algorithm] SHA-256 used for content integrity, not password hashing
 }
 
 // ---------------------------------------------------------------------------

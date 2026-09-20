@@ -956,22 +956,22 @@ export async function getVerificationHistory(
         {
           type: "contract",
           contractIds: [opts.contractId],
-          topics: [
-            // Match the two fixed topic symbols: ["zk", "verify"]
-            ["AAAADwAAAAJ6awAA", "AAAADwAAAAZ2ZXJpZnkAAA=="]
-          ]
+          // Topic filters are arrays of base64-encoded XDR ScVal strings.
+          // We match on the first topic only (Symbol "zk") and accept any
+          // second topic, since both contracts emit ["zk", "verify"].
+          topics: [["AAAADwAAAAJ6awAA"]]
         }
       ],
-      limit
+      pagination: { limit }
     });
 
     const entries: VerificationHistoryEntry[] = [];
 
     for (const event of response.events) {
       try {
-        // Decode the event body map
-        const bodyVal = xdr.ScVal.fromXDR(event.value, "base64");
-        const bodyNative = scValToNative(bodyVal) as Record<string, unknown>;
+        // In @stellar/stellar-sdk v17, event.value is already an xdr.ScVal —
+        // pass it directly to scValToNative without calling fromXDR first.
+        const bodyNative = scValToNative(event.value) as Record<string, unknown>;
 
         const success = Boolean(bodyNative["success"]);
 

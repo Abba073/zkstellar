@@ -131,14 +131,13 @@ export function buildMerkleTree(leaves: bigint[]): MerkleTree {
   }
 
   // Pad leaf array to exactly 2^MERKLE_DEPTH entries.
-  const padded = new Array<bigint>(MERKLE_MAX_LEAVES).fill(MERKLE_ZERO_LEAF);
-  for (let i = 0; i < leaves.length; i++) {
-    padded[i] = leaves[i];
-  }
+  const padded: bigint[] = Array.from({ length: MERKLE_MAX_LEAVES }, (_, i) =>
+    i < leaves.length ? leaves[i] : MERKLE_ZERO_LEAF
+  );
 
   const layers: bigint[][] = [padded];
 
-  let current = padded;
+  let current: bigint[] = padded;
   for (let d = 0; d < MERKLE_DEPTH; d++) {
     const next: bigint[] = [];
     for (let i = 0; i < current.length; i += 2) {
