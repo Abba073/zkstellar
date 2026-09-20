@@ -851,3 +851,173 @@ export async function getContractConfig(
     throw classifyError(error);
   }
 }
+
+// ---------------------------------------------------------------------------
+// getVerificationHistory — page through on-chain verification_result events
+// ---------------------------------------------------------------------------
+
+/**
+ * A single decoded `verification_result` event from either
+ * `contracts/verifier` or `contracts/registry`.
+ */
+export interface VerificationHistoryEntry {
+  /** Whether the proof verified successfully (`success` field of the event). */
+  success: boolean;
+  /**
+   * SHA-256 of the concatenated public inputs, hex-encoded — the same value
+   * as `inputs_hash` in the on-chain event.
+   */
+  inputsHash: string;
+  /**
+   * Caller address, present only for `contracts/verifier` events.
+   * `contracts/registry` events do not include a caller.
+   */
+  caller?: string;
+  /** Ledger sequence number of the ledger that contained this event. */
+  ledger: number;
+  /** Ledger close timestamp (Unix seconds). */
+  ledgerClosedAt: number;
+  /** Transaction hash that triggered the event. */
+  txHash: string;
+}
+
+/**
+ * Options for {@link getVerificationHistory}.
+ */
+export interface GetVerificationHistoryOptions {
+  /** Soroban RPC endpoint URL. */
+  rpcUrl: string;
+  /**
+   * Bech32m contract address of the verifier or registry whose events to
+   * fetch.
+   */
+  contractId: string;
+  /**
+   * Fetch events starting at this ledger (inclusive). Defaults to 0
+   * (oldest available on the RPC node, typically ~24 hours of history).
+   */
+  startLedger?: number;
+  /**
+   * Maximum number of entries to return. Defaults to 100. The RPC node
+   * may return fewer if there are not enough events in the requested range.
+   */
+  limit?: number;
+  /**
+   * If supplied, only include events where `success` matches this value.
+   * By default both successful and failed events are returned.
+   */
+  successFilter?: boolean;
+}
+
+/**
+ * Page through `verification_result` events emitted by a deployed verifier
+ * or registry contract and return them as a typed array, newest first.
+ *
+ * Both `contracts/verifier` and `contracts/registry` emit events with topics
+ * `["zk", "verify"]` on every verification call. This function fetches those
+ * events via `getEvents`, decodes the `success` and `inputs_hash` fields, and
+ * optionally decodes the `caller` field present only in `contracts/verifier`
+ * events.
+ *
+ * The RPC node typically retains events for ~24 hours. For longer-lived
+ * history, index events off-chain as they occur.
+ *
+ * @example
+ * ```ts
+ * const history = await getVerificationHistory({
+ *   rpcUrl: "https://soroban-testnet.stellar.org",
+ *   contractId: "CBL6MAWJALQP25LYKUUOC34K464XPSF6BLKUW6MXZDEXEDXMQUSP7HNN",
+ *   limit: 20,
+ *   successFilter: true, // only successful verifications
+ * });
+ * for (const entry of history) {
+ *   console.log(entry.ledger, entry.inputsHash, entry.success);
+ * }
+ * ```
+ */
+export async function getVerificationHistory(
+  opts: GetVerificationHistoryOptions
+): Promise<VerificationHistoryEntry[]> {
+  const limit = opts.limit ?? 100;
+  const startLedger = opts.startLedger ?? 0;
+
+  try {
+    const server = new rpc.Server(opts.rpcUrl, {
+      allowHttp: opts.rpcUrl.startsWith("http://")
+    });
+
+    // The `getEvents` RPC call accepts topic filters. Both contracts emit
+    // events with topics[0] = "zk" (Symbol) and topics[1] = "verify" (Symbol).
+    // The event body is a map with `success`, `inputs_hash`, and optionally
+    // `caller`.
+    const response = await server.getEvents({
+      startLedger,
+      filters: [
+        {
+          type: "contract",
+          contractIds: [opts.contractId],
+          // Topic filters are arrays of base64-encoded XDR ScVal strings.
+          // We match on the first topic only (Symbol "zk") and accept any
+          // second topic, since both contracts emit ["zk", "verify"].
+          topics: [["AAAADwAAAAJ6awAA"]]
+        }
+      ],
+      pagination: { limit }
+    });
+
+    const entries: VerificationHistoryEntry[] = [];
+
+    for (const event of response.events) {
+      try {
+        // In @stellar/stellar-sdk v17, event.value is already an xdr.ScVal —
+        // pass it directly to scValToNative without calling fromXDR first.
+        const bodyNative = scValToNative(event.value) as Record<string, unknown>;
+
+        const success = Boolean(bodyNative["success"]);
+
+        // Skip if filtered by caller
+        if (opts.successFilter !== undefined && success !== opts.successFilter) {
+          continue;
+        }
+
+        // inputs_hash is a BytesN<32> — comes back as a Buffer/Uint8Array
+        const inputsHashRaw = bodyNative["inputs_hash"];
+        let inputsHash = "";
+        if (inputsHashRaw instanceof Uint8Array || Buffer.isBuffer(inputsHashRaw)) {
+          inputsHash = Buffer.from(inputsHashRaw).toString("hex");
+        } else if (typeof inputsHashRaw === "string") {
+          inputsHash = inputsHashRaw;
+        }
+
+        // caller is an Address — only present in contracts/verifier events
+        let caller: string | undefined;
+        const callerRaw = bodyNative["caller"];
+        if (callerRaw != null) {
+          caller = String(callerRaw);
+        }
+
+        entries.push({
+          success,
+          inputsHash,
+          caller,
+          ledger: Number(event.ledger),
+          ledgerClosedAt: Math.floor(
+            new Date(event.ledgerClosedAt).getTime() / 1000
+          ),
+          txHash: event.txHash
+        });
+      } catch {
+        // Skip malformed events rather than failing the entire call
+        continue;
+      }
+    }
+
+    // Return newest-first (RPC returns oldest-first)
+    return entries.reverse();
+  } catch (error) {
+    if (error instanceof SorobanZkError) {
+      throw error;
+    }
+    throw classifyError(error);
+  }
+}

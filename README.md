@@ -44,8 +44,8 @@ Expected result:
 
 - `contracts/verifier/`: a Soroban verifier contract for a Groth16 proof over BN254, gated by caller auth, per-caller rate limiting, and proof expiry.
 - `contracts/registry/`: a multi-circuit verifying-key registry, deployed to Testnet — supports nullifier-based replay protection and per-circuit deactivation via `remove_circuit`. See [docs/architecture.md](docs/architecture.md#verifying-key-registry).
-- `sdk/`: a TypeScript SDK for Poseidon hashing, snarkjs proof formatting, and on-chain verification.
-- `circuits/`: the reference Poseidon preimage circuit (wired to both contracts above) plus three additional circuits — `merkle_inclusion`, `range_proof`, `threshold_2of3` — registered with `contracts/registry` and tested there, but not yet on the live Testnet deployment (see docs/multi-circuit.md).
+- `sdk/`: a TypeScript SDK for Poseidon hashing, snarkjs proof formatting, on-chain verification, ProofBundle management, Merkle tree utilities, and on-chain event history queries.
+- `circuits/`: the reference Poseidon preimage circuit (wired to both contracts above) plus four additional circuits — `merkle_inclusion`, `range_proof`, `threshold_2of3`, and `identity_commitment` — each with trusted-setup artifacts and example inputs.
 - `demo/`: an end-to-end script that generates a fresh secret, proves knowledge of its Poseidon commitment, and verifies it on Stellar Testnet.
 - `docs/`: architecture notes, ZK primer, proof format specification, security audit checklist, and Poseidon parameter notes.
 
@@ -101,6 +101,89 @@ Known gaps, tracked as open issues rather than left implicit:
 - Verified directly against the live deployment via `demo/`: a correct proof returns `true`, and a proof paired with the wrong public input returns `false`.
 - `contracts/verifier` (the original single-circuit contract) is still live at
   `CBL6MAWJALQP25LYKUUOC34K464XPSF6BLKUW6MXZDEXEDXMQUSP7HNN`, but predates rate-limiting, caller auth, and expiry, and is no longer what `demo/` targets.
+
+## New SDK Features
+
+### ProofBundle utilities (`sdk/src/bundle.ts`)
+
+`createBundle`, `signBundle`, and `verifyBundleIntegrity` make it safe and explicit to package a proof for later submission or storage:
+
+```ts
+import { createBundle, signBundle, verifyBundleIntegrity } from "@zksoroban/sdk";
+
+const bundle = createBundle({
+  proof,
+  publicSignals,
+  circuit: "poseidon_preimage",
+  networkPassphrase: "Test SDF Network ; September 2015",
+});
+
+const signed = signBundle(bundle); // attaches SHA-256 digest
+fs.writeFileSync("proof.bundle.json", JSON.stringify(signed, null, 2));
+
+const result = verifyBundleIntegrity(signed); // checks encoding + digest
+console.log(result.valid); // true
+```
+
+### Merkle tree utilities (`sdk/src/merkle.ts`)
+
+`buildMerkleTree`, `computeMerkleRoot`, `buildMerkleProof`, and `merkleProofToCircuitInputs` build Poseidon Merkle trees matching the `merkle_inclusion` circuit (depth 20):
+
+```ts
+import { buildMerkleTree, buildMerkleProof, merkleProofToCircuitInputs } from "@zksoroban/sdk";
+
+const tree = buildMerkleTree([commitment1, commitment2, commitment3]);
+const proof = buildMerkleProof(tree, 1); // prove commitment2 is in the tree
+
+// Feed directly to snarkjs:
+const inputs = merkleProofToCircuitInputs(proof);
+const { proof: groth16Proof, publicSignals } = await snarkjs.groth16.fullProve(inputs, wasm, zkey);
+```
+
+### On-chain event history (`sdk/src/verify.ts`)
+
+`getVerificationHistory` pages through `verification_result` events from any deployed verifier or registry contract:
+
+```ts
+import { getVerificationHistory } from "@zksoroban/sdk";
+
+const history = await getVerificationHistory({
+  rpcUrl: "https://soroban-testnet.stellar.org",
+  contractId: "CBL6MAWJALQP25LYKUUOC34K464XPSF6BLKUW6MXZDEXEDXMQUSP7HNN",
+  limit: 20,
+  successFilter: true, // only successful verifications
+});
+
+for (const entry of history) {
+  console.log(entry.ledger, entry.inputsHash, entry.success, entry.caller);
+}
+```
+
+### New CLI commands
+
+```bash
+# Decode and integrity-check a bundle file
+node sdk/dist/cjs/cli.js decode-bundle --bundle proof.bundle.json
+
+# Compute the registry nullifier for a proof (to check replay protection)
+node sdk/dist/cjs/cli.js check-nullifier \
+  --proof circuits/poseidon_preimage/fixtures/proof.json \
+  --public circuits/poseidon_preimage/fixtures/public.json \
+  --circuit-id 1
+
+# Compute a Poseidon Merkle root from a list of leaves
+node sdk/dist/cjs/cli.js merkle-root --leaves 1,2,3,4,5
+```
+
+### New circuit: `identity_commitment` (circuit ID 5)
+
+`circuits/identity_commitment/circuit.circom` proves knowledge of a `secret`
+whose double Poseidon hash matches a public `commitment2`:
+`Poseidon(Poseidon(secret)) == commitment2`. The intermediate hash `inner =
+Poseidon(secret)` is also a public input, so a verifier can confirm the
+first-level commitment without learning the secret. Useful for
+anonymous-identity schemes where the on-chain anchor is a second-level hash.
+See [`circuits/identity_commitment/README.md`](circuits/identity_commitment/README.md).
 
 ## Notes
 

@@ -55,29 +55,53 @@ bool result
 
 ## Circuit Layer
 
-The circuit is intentionally minimal. It demonstrates the complete zk integration path on Stellar without introducing application-specific logic like nullifiers, Merkle proofs, or registries.
+The circuits are intentionally focused. Each demonstrates a distinct ZK
+statement that has practical use on Stellar without introducing unnecessary
+complexity. All use Circom 2.1.9 with `circomlib` primitives.
 
-Artifacts:
+| Circuit | File | Public inputs | Use case |
+|---|---|---|---|
+| `poseidon_preimage` | `circuits/poseidon_preimage/` | `commitment` | Reference: prove knowledge of secret |
+| `range_proof` | `circuits/range_proof/` | `min`, `max`, `commitment` | Prove secret ∈ [min, max] privately |
+| `threshold_2of3` | `circuits/threshold_2of3/` | `messageHash`, `commitment0–2` | 2-of-3 multi-sig threshold |
+| `merkle_inclusion` | `circuits/merkle_inclusion/` | `root` | Prove leaf membership in a Merkle tree |
+| `identity_commitment` | `circuits/identity_commitment/` | `inner`, `commitment2` | Double-hash identity anchor |
 
-- `circuit.circom`
-- `input_example.json`
-- `setup/circuit.zkey`
-- `setup/verification_key.json`
+Each circuit ships with:
 
-The setup artifacts are testnet-only and tied to this exact circuit. If the circuit changes, the proving key, verification key, proof vectors, and contract constants must all change with it.
+- `circuit.circom` — the circuit source
+- `input_example.json` — example inputs
+- `setup/circuit.zkey` + `setup/verification_key.json` — testnet-only trusted setup
+- `README.md` — circuit-specific notes
+
+The setup artifacts are testnet-only and tied to the exact circuit. If a circuit
+changes, the proving key, verification key, proof vectors, and any contract
+constants must all change with it.
+
+### `identity_commitment` circuit (circuit ID 5)
+
+Proves `Poseidon(Poseidon(secret)) == commitment2`, making both `inner =
+Poseidon(secret)` and `commitment2` public inputs. This lets a verifier
+confirm a user's registered inner commitment without learning the underlying
+secret, and is designed for anonymous-identity schemes where a user's
+on-chain anchor is a second-level hash. See
+[`circuits/identity_commitment/README.md`](../circuits/identity_commitment/README.md).
 
 ## SDK Layer
 
-The SDK has three responsibilities:
+The SDK has six modules:
 
 - `poseidon.ts`: compute the same Poseidon hash used by the reference circuit
 - `proof.ts`: convert `snarkjs` proof JSON into the exact BN254 byte layout expected by the contract
-- `verify.ts`: build, submit, and decode the Soroban verifier transaction
+- `verify.ts`: build, submit, and decode the Soroban verifier transaction; query on-chain event history
+- `bundle.ts`: construct, sign, and integrity-check typed `ProofBundle` envelopes
+- `merkle.ts`: build Poseidon Merkle trees and generate inclusion proof inputs for `merkle_inclusion`
+- `verifyOffChain.ts`: local off-chain proof verification using snarkjs directly
 
 Public API:
 
 - `poseidon(inputs: bigint[]): bigint`
-- `formatProof(proof, publicSignals): SorobanProofCalldata`
+- `formatProof(proof, publicSignals, expiryLedger?): SorobanProofCalldata`
 - `formatVerifyingKey(vk): RegistryVerifyingKey`
 - `verifyOnChain(opts): Promise<VerifyResult>` — `contracts/verifier`, signed transaction
 - `verifyViaRegistry(opts): Promise<boolean>` — `contracts/registry`, simulation-only
@@ -85,10 +109,76 @@ Public API:
 - `verifyBatchViaRegistry(opts): Promise<boolean[]>` — `contracts/registry`, batched, simulation-only
 - `estimateVerifyFee(opts): Promise<EstimateVerifyFeeResult>`
 - `getContractConfig(opts): Promise<ContractConfig>`
+- `getVerificationHistory(opts): Promise<VerificationHistoryEntry[]>` — page through on-chain `verification_result` events
+- `createBundle(opts): ProofBundle` — build a typed, JSON-serializable proof bundle
+- `signBundle(bundle): SignedBundle` — attach a SHA-256 content digest for tamper-detection
+- `verifyBundleIntegrity(bundle): BundleIntegrityResult` — validate encoding and (optionally) the digest
+- `bundleDigest(bundle): string` — compute the SHA-256 digest of a bundle's content fields
+- `buildMerkleTree(leaves): MerkleTree` — build a depth-20 Poseidon Merkle tree
+- `computeMerkleRoot(leaves): bigint` — convenience: build a tree and return its root
+- `buildMerkleProof(tree, leafIndex): MerkleProof` — generate an inclusion proof for the `merkle_inclusion` circuit
+- `merkleProofToCircuitInputs(proof): Record<string, unknown>` — convert a `MerkleProof` to snarkjs-ready circuit input
+- `verifyOffChain(proof, publicSignals, vk): Promise<boolean>` — local verification via snarkjs
 
-See [Batch Verification](#batch-verification) below for the two batch functions.
+See [Batch Verification](#batch-verification) and the sections below for detailed usage.
 
 The SDK is stateless. RPC URL, contract ID, and source keypair are passed in at call time.
+
+### ProofBundle Management (`bundle.ts`)
+
+A `ProofBundle` is a self-describing JSON envelope that packages a snarkjs
+Groth16 proof together with its circuit name, network passphrase, and
+generation timestamp. `createBundle` constructs one from a proof and options;
+`signBundle` attaches a SHA-256 content digest so any post-creation
+modification is detectable by `verifyBundleIntegrity`.
+
+```ts
+import { createBundle, signBundle, verifyBundleIntegrity } from "@zksoroban/sdk";
+
+const bundle = createBundle({
+  proof, publicSignals,
+  circuit: "poseidon_preimage",
+  networkPassphrase: "Test SDF Network ; September 2015",
+});
+const signed = signBundle(bundle);
+const { valid, reason } = verifyBundleIntegrity(signed);
+```
+
+### Merkle Tree Utilities (`merkle.ts`)
+
+`buildMerkleTree` builds a depth-20 Poseidon Merkle tree from an array of
+leaf field elements, padding to 2^20 entries with zero-leaves. Each internal
+node is `Poseidon(left, right)`, matching the `merkle_inclusion` circuit exactly.
+`buildMerkleProof` generates the `pathElements` and `pathIndices` arrays that
+the circuit expects as private inputs, and `merkleProofToCircuitInputs` wraps
+the result into the plain-string object snarkjs's `groth16.fullProve` accepts.
+
+```ts
+import { buildMerkleTree, buildMerkleProof, merkleProofToCircuitInputs } from "@zksoroban/sdk";
+
+const tree = buildMerkleTree([commitment1, commitment2, commitment3]);
+const proof = buildMerkleProof(tree, 1);          // prove leaf at index 1
+const inputs = merkleProofToCircuitInputs(proof); // ready for snarkjs
+```
+
+### On-Chain Event History (`verify.ts`)
+
+`getVerificationHistory` fetches `verification_result` events from a
+deployed verifier or registry contract using the Soroban RPC `getEvents`
+endpoint, decodes each event's `success`, `inputs_hash`, and (for
+`contracts/verifier`) `caller` fields, and returns the results newest-first
+as a typed `VerificationHistoryEntry[]`.
+
+```ts
+import { getVerificationHistory } from "@zksoroban/sdk";
+
+const history = await getVerificationHistory({
+  rpcUrl: "https://soroban-testnet.stellar.org",
+  contractId: "CBL6MAWJALQP25LYKUUOC34K464XPSF6BLKUW6MXZDEXEDXMQUSP7HNN",
+  limit: 50,
+  successFilter: true,  // only successful verifications
+});
+```
 
 ## Contract Layer
 
@@ -480,10 +570,24 @@ Why Groth16:
 
 Out of scope for the current architecture:
 
-- nullifier tracking
-- multi-circuit verifier registries
+- nullifier tracking on `contracts/verifier` (present on `contracts/registry`)
 - privacy-preserving application logic
 - production trusted setup ceremonies
 - wallet UX
 
 Those are downstream systems that can be built on top of this foundation.
+
+## CLI Reference
+
+The SDK ships a CLI tool (entry point `sdk/dist/cjs/cli.js`) with the following commands:
+
+| Command | Purpose |
+|---|---|
+| `prove --secret <n>` | Compute `Poseidon(secret)` and print circuit inputs |
+| `verify --proof <f> --public <f>` | Encode a proof to Soroban calldata and report byte lengths |
+| `inspect --bundle <f>` | Print `ProofBundle` metadata and calldata sizes |
+| `estimate-fee --proof <f> --public <f>` | Static fee estimate in stroops |
+| `format-vk --vk <f> --id <n>` | Encode a `verification_key.json` and print the ready-to-run `register_circuit` command |
+| `decode-bundle --bundle <f>` | Decode a `ProofBundle` file, validate encoding and optional digest |
+| `check-nullifier --proof <f> --public <f> --circuit-id <n>` | Compute the registry nullifier hash for a proof + circuit pair |
+| `merkle-root --leaves <n1,n2,...>` | Compute a Poseidon Merkle root from a comma-separated list of leaves |

@@ -197,6 +197,14 @@ export class NetworkMismatchError extends SorobanZkError {
 }
 
 /**
+ * Options for {@link getVerificationHistory}.
+ * (Re-exported from verify.ts for convenience — see that module for the full
+ * interface definition and the {@link VerificationHistoryEntry} type.)
+ */
+// Note: VerificationHistoryEntry and GetVerificationHistoryOptions are defined
+// in verify.ts alongside getVerificationHistory and re-exported from index.ts.
+
+/**
  * A read-only snapshot of all non-sensitive verifier contract configuration
  * fields, as returned by the `get_config` contract function.
  *

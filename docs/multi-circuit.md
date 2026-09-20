@@ -21,6 +21,7 @@ registry — and what to change to add a fourth circuit later.
 | `2` | `range_proof` | 3 (`min`, `max`, `commitment`) |
 | `3` | `threshold_2of3` | 4 (`messageHash`, `commitment0`, `commitment1`, `commitment2`) |
 | `4` | `merkle_inclusion` | 1 (`root`) |
+| `5` | `identity_commitment` | 2 (`inner`, `commitment2`) |
 
 These IDs are a convention, not something the registry contract enforces —
 `register_circuit(id, vk)` accepts any `u32` an admin chooses. Keeping a
@@ -128,6 +129,8 @@ const verified = await verifyViaRegistry({
 purely additive, so existing single-circuit call sites keep working.
 
 ## Adding a fifth circuit
+
+The `identity_commitment` circuit occupies circuit ID 5. To add a sixth circuit:
 
 1. Write `circuits/<name>/circuit.circom`, following an existing circuit's
    structure as a template.
