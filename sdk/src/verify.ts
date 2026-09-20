@@ -87,7 +87,7 @@ function makeRegistryBatchItemScVal(circuitId: number, calldata: SorobanProofCal
 }
 
 function feeFromResult(result: xdr.TransactionResult): string {
-  return result.feeCharged().toString();
+  return result.feeCharged.toString();
 }
 
 // Maps contracts/verifier's `Error` enum (#[contracterror], repr(u32)) to a
@@ -139,7 +139,7 @@ function decodeReturnValueFromDiagnostics(
   }
 
   for (const event of diagnosticEventsXdr) {
-    const contractEvent = event.event();
+    const contractEvent = event.event;
     const topics = contractEvent.body().v0().topics();
     if (topics.length < 2) {
       continue;
@@ -184,7 +184,7 @@ function decodeBoolArrayFromDiagnostics(
 
   for (const encoded of diagnosticEventsXdr) {
     const event = xdr.DiagnosticEvent.fromXDR(encoded, "base64");
-    const contractEvent = event.event();
+    const contractEvent = event.event;
     const topics = contractEvent.body().v0().topics();
     if (topics.length < 2) {
       continue;
