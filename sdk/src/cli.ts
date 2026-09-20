@@ -1,7 +1,10 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 
-import { formatProof, formatVerifyingKey } from "./proof.js";
+import { bundleDigest, createBundle, verifyBundleIntegrity } from "./bundle.js";
+import { buildMerkleTree, computeMerkleRoot } from "./merkle.js";
 import { poseidon } from "./poseidon.js";
+import { formatProof, formatVerifyingKey } from "./proof.js";
 import { SnarkjsProof, SorobanZkError, SorobanZkErrorCode, VerificationKey } from "./types.js";
 
 // The live Testnet deployment documented in docs/architecture.md and
@@ -15,17 +18,21 @@ interface InspectableBundle {
   circuit: string;
   generatedAt: string;
   networkPassphrase: string;
+  digest?: string;
 }
 
 const USAGE = [
   "zksoroban <command> [options]",
   "",
   "Commands:",
-  "  prove         --secret <decimal>            compute the Poseidon commitment and circuit input",
-  "  verify        --proof <file> --public <file>  encode to Soroban calldata and report the byte layout",
-  "  inspect       --bundle <file>               print ProofBundle metadata and calldata sizes",
-  "  estimate-fee  --proof <file> --public <file>  print a deterministic fee estimate",
-  "  format-vk     --vk <file> --id <u32> [--registry-id <id>]  encode a verification_key.json for register_circuit"
+  "  prove          --secret <decimal>                     compute Poseidon commitment",
+  "  verify         --proof <file> --public <file>         encode to Soroban calldata",
+  "  inspect        --bundle <file>                        print ProofBundle metadata",
+  "  estimate-fee   --proof <file> --public <file>         deterministic fee estimate",
+  "  format-vk      --vk <file> --id <u32> [--registry-id <id>]  encode VK for register_circuit",
+  "  decode-bundle  --bundle <file>                        decode and integrity-check a ProofBundle",
+  "  check-nullifier --proof <file> --public <file> --circuit-id <u32>  compute the registry nullifier hash",
+  "  merkle-root    --leaves <n1,n2,...>                   compute Poseidon Merkle root from a list of field elements"
 ].join("\n");
 
 function getFlag(args: string[], name: string): string | undefined {
@@ -151,6 +158,151 @@ function commandFormatVk(args: string[]): string[] {
   ];
 }
 
+// ---------------------------------------------------------------------------
+// decode-bundle — decode and integrity-check a ProofBundle file
+// ---------------------------------------------------------------------------
+
+function commandDecodeBundle(args: string[]): string[] {
+  const bundlePath = requireFlag(args, "--bundle");
+  const raw = readJson<InspectableBundle>(bundlePath);
+
+  // Re-construct as a proper bundle to run integrity checks
+  const bundle = createBundle({
+    proof: raw.proof,
+    publicSignals: raw.publicSignals,
+    circuit: raw.circuit,
+    networkPassphrase: raw.networkPassphrase,
+    generatedAt: raw.generatedAt
+  });
+
+  const integrity = verifyBundleIntegrity(raw.digest ? { ...bundle, digest: raw.digest } : bundle);
+
+  const lines: string[] = [
+    "command: decode-bundle",
+    `file: ${bundlePath}`,
+    "",
+    `circuit:           ${raw.circuit}`,
+    `generatedAt:       ${raw.generatedAt}`,
+    `networkPassphrase: ${raw.networkPassphrase}`,
+    `proof protocol:    ${raw.proof.protocol}`,
+    `public signals:    ${raw.publicSignals.length}`,
+    ...formatList(raw.publicSignals),
+    "",
+    `calldata encoding: ${integrity.valid ? "ok" : "FAIL"}`,
+  ];
+
+  if (!integrity.valid && integrity.reason) {
+    lines.push(`integrity error:   ${integrity.reason}`);
+  }
+
+  if (raw.digest) {
+    lines.push(`stored digest:     ${raw.digest.slice(0, 16)}…`);
+    lines.push(`digest valid:      ${integrity.valid ? "yes" : "no"}`);
+  } else {
+    // Compute and display digest even if not already stored
+    const computed = bundleDigest(bundle);
+    lines.push(`digest (computed): ${computed.slice(0, 16)}… (add "digest" field to sign bundle)`);
+  }
+
+  return lines;
+}
+
+// ---------------------------------------------------------------------------
+// check-nullifier — compute the registry nullifier for a proof+circuit pair
+// ---------------------------------------------------------------------------
+//
+// The registry's replay-protection nullifier is:
+//   sha256( circuit_id_be_4bytes || sha256( concat(public_inputs_bytes) ) )
+//
+// This mirrors contracts/registry/src/lib.rs's `compute_nullifier` function
+// exactly, so callers can check whether a proof has already been consumed
+// before submitting it.
+
+function commandCheckNullifier(args: string[]): string[] {
+  const proof = readJson<SnarkjsProof>(requireFlag(args, "--proof"));
+  const publicSignals = readJson<string[]>(requireFlag(args, "--public"));
+  const circuitId = Number(requireFlag(args, "--circuit-id"));
+
+  if (!Number.isInteger(circuitId) || circuitId < 0 || circuitId > 0xffffffff) {
+    throw new SorobanZkError(
+      "--circuit-id must be a u32 integer",
+      SorobanZkErrorCode.INVALID_PUBLIC_INPUT
+    );
+  }
+
+  const calldata = formatProof(proof, publicSignals);
+
+  // Step 1: inputs_hash = sha256(concat(public_inputs))
+  const inputsConcat = Buffer.concat(calldata.publicInputs);
+  const inputsHash = createHash("sha256").update(inputsConcat).digest();
+
+  // Step 2: nullifier = sha256(circuit_id_be || inputs_hash)
+  const circuitIdBe = Buffer.alloc(4);
+  circuitIdBe.writeUInt32BE(circuitId, 0);
+  const nullifier = createHash("sha256")
+    .update(Buffer.concat([circuitIdBe, inputsHash]))
+    .digest("hex");
+
+  return [
+    "command: check-nullifier",
+    `circuit id:   ${circuitId}`,
+    `public inputs: ${publicSignals.length}`,
+    ...formatList(publicSignals),
+    "",
+    `inputs_hash:  ${inputsHash.toString("hex")}`,
+    `nullifier:    ${nullifier}`,
+    "",
+    "To check whether this proof has already been consumed on-chain, query:",
+    `  stellar contract invoke --id <registry-contract-id> \\`,
+    `    -- is_nullifier_used --nullifier '${nullifier}'`
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// merkle-root — compute a Poseidon Merkle root from a comma-separated list
+// ---------------------------------------------------------------------------
+
+function commandMerkleRoot(args: string[]): string[] {
+  const leavesRaw = requireFlag(args, "--leaves");
+  const leafStrings = leavesRaw.split(",").map((s) => s.trim()).filter(Boolean);
+
+  if (leafStrings.length === 0) {
+    throw new SorobanZkError(
+      "--leaves must be a non-empty comma-separated list of field elements",
+      SorobanZkErrorCode.INVALID_PUBLIC_INPUT
+    );
+  }
+
+  const leaves = leafStrings.map((s, i) => {
+    try {
+      return BigInt(s);
+    } catch {
+      throw new SorobanZkError(
+        `leaves[${i}] "${s}" is not a valid integer`,
+        SorobanZkErrorCode.INVALID_PUBLIC_INPUT
+      );
+    }
+  });
+
+  const tree = buildMerkleTree(leaves);
+  const root = computeMerkleRoot(leaves);
+
+  return [
+    "command: merkle-root",
+    `leaves:  ${leaves.length}`,
+    ...formatList(leaves.map((l) => l.toString())),
+    "",
+    `depth:   ${20}`,
+    `root:    ${root.toString()}`,
+    "",
+    "Pass this root as the `root` public input to the merkle_inclusion circuit."
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// runCli
+// ---------------------------------------------------------------------------
+
 export function runCli(argv: string[]): string {
   const [command, ...args] = argv;
 
@@ -165,6 +317,12 @@ export function runCli(argv: string[]): string {
       return commandEstimateFee(args).join("\n");
     case "format-vk":
       return commandFormatVk(args).join("\n");
+    case "decode-bundle":
+      return commandDecodeBundle(args).join("\n");
+    case "check-nullifier":
+      return commandCheckNullifier(args).join("\n");
+    case "merkle-root":
+      return commandMerkleRoot(args).join("\n");
     default:
       return USAGE;
   }

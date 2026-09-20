@@ -1,0 +1,7 @@
+{
+  "_comment": "Example input for circuits/identity_commitment/circuit.circom",
+  "_note": "inner = Poseidon(secret), commitment2 = Poseidon(inner). Compute these with: node -e \"const {poseidon} = require('@zksoroban/sdk'); const s=42n; const i=poseidon([s]); console.log({inner:i.toString(),commitment2:poseidon([i]).toString()})\"",
+  "secret": "42",
+  "inner": "5231313629600551988563480977219920481048811582901397524636327422960124977367",
+  "commitment2": "10866149785801534755919728481148836890866403777375505042218781207506616818428"
+}
