@@ -1198,3 +1198,186 @@ fn verify_batch_rejects_call_with_no_authorization() {
 
     client.verify_batch(&caller, &Vec::new(&env));
 }
+
+// ---------------------------------------------------------------------------
+// Pause feature (#new)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn is_paused_returns_false_by_default() {
+    let (_env, _admin, client) = setup(10, 100);
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn set_paused_true_makes_is_paused_return_true() {
+    let (_env, _admin, client) = setup(10, 100);
+    client.set_paused(&true);
+    assert!(client.is_paused());
+}
+
+#[test]
+fn set_paused_false_unpauses_the_contract() {
+    let (_env, _admin, client) = setup(10, 100);
+    client.set_paused(&true);
+    assert!(client.is_paused());
+    client.set_paused(&false);
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn verify_proof_returns_contract_paused_error_when_paused() {
+    let (env, _admin, client) = setup(10, 100);
+    env.ledger().with_mut(|li| li.sequence_number = 100);
+    let caller = Address::generate(&env);
+
+    client.set_paused(&true);
+
+    let result = client.try_verify_proof(
+        &caller,
+        &Bytes::from_array(&env, &VALID_PROOF_A),
+        &Bytes::from_array(&env, &VALID_PROOF_B),
+        &Bytes::from_array(&env, &VALID_PROOF_C),
+        &public_inputs_with_expiry(&env, u32::MAX),
+    );
+
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn verify_proof_succeeds_again_after_unpausing() {
+    let (env, _admin, client) = setup(10, 100);
+    env.ledger().with_mut(|li| li.sequence_number = 100);
+    let caller = Address::generate(&env);
+
+    client.set_paused(&true);
+    let paused_result = client.try_verify_proof(
+        &caller,
+        &Bytes::from_array(&env, &VALID_PROOF_A),
+        &Bytes::from_array(&env, &VALID_PROOF_B),
+        &Bytes::from_array(&env, &VALID_PROOF_C),
+        &public_inputs_with_expiry(&env, u32::MAX),
+    );
+    assert_eq!(paused_result, Err(Ok(Error::ContractPaused)));
+
+    client.set_paused(&false);
+    assert!(call_with_expiry(&env, &client, &caller, u32::MAX));
+}
+
+#[test]
+fn verify_batch_returns_contract_paused_error_when_paused() {
+    let (env, _admin, client) = setup(10, 100);
+    env.ledger().with_mut(|li| li.sequence_number = 100);
+    let caller = Address::generate(&env);
+
+    client.set_paused(&true);
+
+    let item = valid_batch_item(&env);
+    let result = client.try_verify_batch(&caller, &vec![&env, item]);
+
+    // verify_batch propagates NotInitialized from verify_one; ContractPaused
+    // follows the same Err path so the whole batch call fails.
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn verify_batch_succeeds_again_after_unpausing() {
+    let (env, _admin, client) = setup(10, 100);
+    env.ledger().with_mut(|li| li.sequence_number = 100);
+    let caller = Address::generate(&env);
+
+    client.set_paused(&true);
+    let paused = client.try_verify_batch(&caller, &vec![&env, valid_batch_item(&env)]);
+    assert_eq!(paused, Err(Ok(Error::ContractPaused)));
+
+    client.set_paused(&false);
+    let results = client.verify_batch(&caller, &vec![&env, valid_batch_item(&env)]);
+    assert_eq!(results, vec![&env, true]);
+}
+
+#[test]
+fn get_config_paused_field_reflects_pause_state() {
+    let (_env, _admin, client) = setup(10, 100);
+
+    assert!(!client.get_config().paused);
+
+    client.set_paused(&true);
+    assert!(client.get_config().paused);
+
+    client.set_paused(&false);
+    assert!(!client.get_config().paused);
+}
+
+#[test]
+#[should_panic]
+fn set_paused_rejects_call_with_no_authorization() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let vk = poseidon_vk(&env);
+    let contract_id = env.register(VerifierContract, (admin, 10u32, 100u32, vk));
+    let client = VerifierContractClient::new(&env, &contract_id);
+
+    // No auth mocked — must panic.
+    client.set_paused(&true);
+}
+
+#[test]
+fn set_paused_requires_admin_not_arbitrary_caller() {
+    let (env, _admin, client) = setup(10, 100);
+    let attacker = Address::generate(&env);
+
+    let result = client
+        .mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "set_paused",
+                args: (true,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_set_paused(&true);
+
+    assert!(result.is_err());
+    // Contract must remain unpaused.
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn pausing_does_not_affect_admin_management_functions() {
+    // Pausing should only gate verify_proof / verify_batch, not admin
+    // operations like set_limits or propose_admin.
+    let (_env, _admin, client) = setup(10, 100);
+
+    client.set_paused(&true);
+
+    // Admin operations must still succeed while paused.
+    client.set_limits(&5, &50);
+    let limits = client.limits();
+    assert_eq!(limits.max_calls, 5);
+    assert_eq!(limits.window_size, 50);
+}
+
+#[test]
+fn pausing_does_not_increment_rate_limit_counter() {
+    // A rejected call due to pause must not consume any rate-limit budget.
+    let (env, _admin, client) = setup(1, 100);
+    env.ledger().with_mut(|li| li.sequence_number = 100);
+    let caller = Address::generate(&env);
+
+    client.set_paused(&true);
+
+    // Attempt while paused — should fail with ContractPaused, not consume budget.
+    let _ = client.try_verify_proof(
+        &caller,
+        &Bytes::from_array(&env, &VALID_PROOF_A),
+        &Bytes::from_array(&env, &VALID_PROOF_B),
+        &Bytes::from_array(&env, &VALID_PROOF_C),
+        &public_inputs_with_expiry(&env, u32::MAX),
+    );
+
+    client.set_paused(&false);
+
+    // The one allowed call must still succeed after unpausing.
+    assert!(call_with_expiry(&env, &client, &caller, u32::MAX));
+}

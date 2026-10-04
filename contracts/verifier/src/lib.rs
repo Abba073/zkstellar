@@ -62,6 +62,7 @@ enum DataKey {
     AllowlistEnabled,
     Allowlist(Address),
     VerificationCount(BytesN<32>),
+    Paused,
 }
 
 #[contracterror]
@@ -75,6 +76,7 @@ pub enum Error {
     CallerNotAllowed = 5,
     InvalidVerifyingKey = 6,
     NoPendingAdmin = 7,
+    ContractPaused = 8,
 }
 
 /// Emitted on every `verify_proof` call, regardless of outcome.
@@ -257,7 +259,11 @@ impl VerifierContract {
 
         Ok(ContractConfig {
             admin,
-            paused: false,
+            paused: env
+                .storage()
+                .instance()
+                .get(&DataKey::Paused)
+                .unwrap_or(false),
             fee_amount: None,
             fee_token: None,
             rate_limit_max: limits.max_calls,
@@ -318,6 +324,32 @@ impl VerifierContract {
         Ok(())
     }
 
+    /// Pause or unpause the contract. When paused, all `verify_proof` and
+    /// `verify_batch` calls return `Err(Error::ContractPaused)`. Admin-only.
+    ///
+    /// Pausing is an emergency kill-switch: it lets the admin stop all proof
+    /// submissions immediately (e.g. after discovering a circuit bug) without
+    /// waiting for a contract upgrade to be prepared and deployed.
+    pub fn set_paused(env: Env, paused: bool) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
+        env.storage().instance().set(&DataKey::Paused, &paused);
+        Ok(())
+    }
+
+    /// Return `true` if the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
     pub fn verify_proof(
         env: Env,
         caller: Address,
@@ -363,6 +395,9 @@ impl VerifierContract {
     /// `Err(Error::NotInitialized)` is the one exception: that means the
     /// contract itself isn't set up, not that any particular proof is bad,
     /// so it aborts the whole batch (nothing in it could have succeeded).
+    /// `Err(Error::ContractPaused)` likewise aborts the whole batch — when
+    /// the contract is paused no proof can succeed, so failing fast is
+    /// preferable to filling the returned vec with `false`.
     pub fn verify_batch(
         env: Env,
         caller: Address,
@@ -374,7 +409,12 @@ impl VerifierContract {
         for item in proofs.iter() {
             let success = match verify_one(&env, &caller, &item) {
                 Ok(success) => success,
+                // Contract-wide errors abort the entire batch: nothing in it
+                // could have succeeded when the contract is uninitialised or
+                // paused, so propagate immediately rather than silently
+                // filling the vec with `false`.
                 Err(Error::NotInitialized) => return Err(Error::NotInitialized),
+                Err(Error::ContractPaused) => return Err(Error::ContractPaused),
                 Err(_) => false,
             };
             publish_verification_result(&env, &caller, success, &item.public_inputs);
@@ -391,6 +431,16 @@ impl VerifierContract {
 /// callers decide when and whether that's meaningful for their own outcome
 /// handling (see `verify_proof` and `verify_batch` above).
 fn verify_one(env: &Env, caller: &Address, item: &ProofItem) -> Result<bool, Error> {
+    // Pause check: reject immediately if the contract is paused.
+    let paused: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false);
+    if paused {
+        return Err(Error::ContractPaused);
+    }
+
     let allowlist_enabled: bool = env
         .storage()
         .instance()
